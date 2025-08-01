@@ -1,19 +1,15 @@
-# AdaptixC2 Offline Build Configuration for Linux x86_64
+# AdaptixC2 Offline Build with Relocatable Zip Package
 # 
-# This Nix file builds AdaptixC2 without requiring internet access during the build phase.
-# All network resources are pre-fetched during the fetch phase, including Go 1.24.4.
+# This builds AdaptixC2 using the original build method (make all) and creates a relocatable zip
+# The zip can be extracted and run on other Linux x86_64 systems
 #
-# Target: Linux x86_64 only
+# HASHES TO REPLACE:
+# 1. Go 1.24.4 hash: nix-prefetch-url https://go.dev/dl/go1.24.4.linux-amd64.tar.gz
+# 2. Drivers.csv hash: Automatically handled by CI or manual prefetch  
+# 3. Agent beacon vendor hash: Run build, copy hash from error message
 #
-# QUICK START:
-# 1. Get Go hash:     nix-prefetch-url https://go.dev/dl/go1.24.4.linux-amd64.tar.gz
-# 2. Get CSV hash:    nix-prefetch-url https://www.loldrivers.io/api/drivers.csv  
-# 3. Replace hashes in this file (lines ~34 and ~62)
-# 4. Build once:      nix-build AdaptixC2-Offline.nix (fails, shows vendor hash)
-# 5. Replace vendor hash (line ~97)
-# 6. Build again:     nix-build AdaptixC2-Offline.nix (succeeds!)
-# 
 # Usage: nix-build AdaptixC2-Offline.nix
+# Result: Creates both the normal build AND a zip file in result/
 
 let
   pkgs = import <nixpkgs> { };
@@ -28,9 +24,9 @@ let
     # Fetch official Go binary release for Linux x86_64
     src = pkgs.fetchurl {
       url = "https://go.dev/dl/go${version}.linux-amd64.tar.gz";
-      sha256 = "05w7z46p8633mbjq5grwhx0x1i0va7zbc624pbqsxbkjpcrxmrbp"; # Replace with correct hash
+      sha256 = "sha256-d+XaM7tyrq7xukQYtv5RG8TQQYc8v4LlqmMYdA35hxc=";
     };
-
+    
     # No build needed for binary release
     dontBuild = true;
     dontConfigure = true;
@@ -68,8 +64,10 @@ EOF
     passthru = {
       inherit version;
       isGo = true;
+      # Required attributes for buildGoModule
       GOOS = "linux";
       GOARCH = "amd64";
+      CGO_ENABLED = "1";
     };
     
     meta = with pkgs.lib; {
@@ -79,12 +77,14 @@ EOF
       platforms = [ "x86_64-linux" ];
     };
   };
-  
+
+  # Pre-fetch the vulnerable drivers CSV that SAL-BOF tries to download during build
   vulnerableDriversList = pkgs.fetchurl {
     url = "https://www.loldrivers.io/api/drivers.csv";
-    sha256 = "1zz97j1x807pwq5sk2lbhb3clkxk6yk71szr6bf7cmc0spra5f0f";
+    sha256 = "1zz97j1x807pwq5sk2lbhb3clkxk6yk71szr6bf7cmc0spra5f0f"; # Replace with correct hash
   };
-  
+
+  # Create a script to handle offline builds by patching network calls
   patchNetworkCalls = pkgs.writeShellScript "patch-network-calls" ''
     set -e
     
@@ -144,6 +144,219 @@ EOF
     echo "Network call patching complete"
   '';
 
+  adaptixServerVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-server-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+
+    sourceRoot = "source/AdaptixServer";
+    vendorHash = "sha256-OA38UqImIin/qkqR1G0nYc4mdIUosykm8maUTm5J41A=";
+
+    env.CGO_ENABLED = "1";
+
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for agent_beacon"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored agent_beacon dependencies" > $out/vendor-info.txt
+    '';    
+  };
+
+  # Vendor Go modules for agent_beacon specifically
+  agentBeaconVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-agent-beacon-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/agent_beacon";
+    
+    # Vendor hash for agent_beacon - replace with correct hash from build error
+    # To get this hash: run the build, it will fail showing the correct hash
+    vendorHash = "sha256-E4TcNkYFgFKULVYGPaY63exLrZAeWSf3qI2h8Et3iq4=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for agent_beacon"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored agent_beacon dependencies" > $out/vendor-info.txt
+    '';
+  };
+
+  # Vendor Go modules for agent_gopher specifically
+  agentGopherVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-agent-gopher-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/agent_gopher";
+    
+    # Vendor hash for agent_gopher - replace with correct hash from build error
+    # To get this hash: run the build, it will fail showing the correct hash
+    vendorHash = "sha256-k+zJYJMmsjcwu0bOLLXAe06w2BAfPIMN/58IglrUetg=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for agent_gopher"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored agent_gopher dependencies" > $out/vendor-info.txt
+    '';
+  };
+
+  # Vendor Go modules for listener_beacon_http specifically
+  listenerBeaconHTTPVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-listener-beacon-http-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/listener_beacon_http";
+
+    vendorHash = "sha256-67AX3MMfUHIdDBk2ODKvaFAnQs5P93IfjHmaKckLXNg=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for listener_beacon_http"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored listener_beacon_http dependencies" > $out/vendor-info.txt
+    '';
+  };
+
+  # Vendor Go modules for listener_beacon_smb specifically
+  listenerBeaconSMBVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-listener-beacon-smb-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/listener_beacon_smb";
+    
+    vendorHash = "sha256-xf25iOaj9YKhucEkj92xX0oFdaqDWdIipSTGXGZd0pM=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for listener_beacon_smb"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored listener_beacon_smb dependencies" > $out/vendor-info.txt
+    '';
+  };
+
+  # Vendor Go modules for listener_beacon_tcp specifically
+  listenerBeaconTCPVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-listener-beacon-tcp-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/listener_beacon_tcp";
+    
+    vendorHash = "sha256-xf25iOaj9YKhucEkj92xX0oFdaqDWdIipSTGXGZd0pM=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for listener_beacon_tcp"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored listener_beacon_tcp dependencies" > $out/vendor-info.txt
+    '';
+  };
+
+
+  # Vendor Go modules for listener_gopher_tcp specifically
+  listenerGopherTCPVendor = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
+    pname = "adaptix-listener-gopher-tcp-vendor";
+    version = "0.7.0";
+    
+    src = pkgs.fetchzip {
+      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
+      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
+    };
+    
+    sourceRoot = "source/Extenders/listener_gopher_tcp";
+    
+    vendorHash = "sha256-eU4gcNEworCXqUjLb9qLkrnFRS0TXfttKkUTJntkUcQ=";
+    
+    env.CGO_ENABLED = "1";
+    
+    # We only want the vendor directory, not to actually build
+    buildPhase = ''
+      echo "Vendoring complete for listener_gopher_tcp"
+    '';
+    
+    installPhase = ''
+      mkdir -p $out
+      cp -r vendor $out/ || echo "No vendor directory found"
+      cp go.mod $out/ || true
+      cp go.sum $out/ || true
+      echo "Vendored listener_gopher_tcp dependencies" > $out/vendor-info.txt
+    '';
+  };
+  
   # Extension kit - handle Go dependencies if any
   extensionkit = stdenv.mkDerivation rec {
     pname = "adaptix-extensions";
@@ -169,7 +382,7 @@ EOF
       openssl
       cacert
     ];
-    
+        
     configurePhase = ''
       echo "Skipping configurePhase"
     '';
@@ -209,22 +422,13 @@ EOF
       # Apply network call patches
       ${patchNetworkCalls}
       
-      # Disable any other potential network calls
-      export NO_NETWORK=1
-      export OFFLINE_BUILD=1
       
       # Build each component
       for dir in */; do
         dirname=$(basename "$dir")
         if [ -d "$dir" ] && ([ -f "$dir/Makefile" ] || [ -f "$dir/makefile" ]); then
           echo "Building $dirname..."
-          (cd "$dir" && make) || {
-            echo "Initial build failed for $dirname, trying with offline flags..."
-            (cd "$dir" && make OFFLINE=1 NO_NETWORK=1) || {
-              echo "Warning: Failed to build $dirname, but continuing..."
-              # Don't fail the entire build for one component
-            }
-          }
+          (cd "$dir" && make)
         elif [ -d "$dir" ]; then
           echo "Skipping $dirname (no Makefile)"
         fi
@@ -248,117 +452,191 @@ EOF
     '';
   };
 
-  adaptixServer = pkgs.buildGoModule.override { go = go_1_24_4; } rec {
-    pname = "adaptix-server";
+  # Main adaptix package that builds both server and client together like the original
+  adaptix = stdenv.mkDerivation rec {
+    pname = "AdaptixC2";
     version = "0.7.0";
-    
     src = pkgs.fetchzip {
       url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
       sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
     };
     
-    sourceRoot = "source/AdaptixServer";
-    
-    vendorHash = "sha256-OA38UqImIin/qkqR1G0nYc4mdIUosykm8maUTm5J41A=";
-        
-    buildInputs = with pkgs; [
-      openssl
+    nativeBuildInputs = [
+      pkgs.gnumake
+      pkgs.cmake
+      pkgs.pkg-config
+      pkgs.makeWrapper
     ];
     
-    nativeBuildInputs = with pkgs; [
-      pkg-config
+    buildInputs = [
+      extensionkit
+      pkgs.pkgsCross.mingwW64.buildPackages.gcc
+      pkgs.pkgsCross.mingw32.buildPackages.gcc
+      go_1_24_4
+      pkgs.openssl
+      pkgs.qt6.qtbase
+      pkgs.qt6.qtwebsockets
     ];
     
-    env.CGO_ENABLED = "1";
-  };
-
-  adaptixClient = stdenv.mkDerivation rec {
-    pname = "adaptix-client";
-    version = "0.7.0";
-    
-    src = pkgs.fetchzip {
-      url = "https://github.com/Adaptix-Framework/AdaptixC2/archive/a2454af19f7a3ee18d5f47e5bd0dc720553f9026.tar.gz";
-      sha256 = "19199nxbc5024wxajjfjm2yq1ncmw7vf6r8n0fzlq84n83k5f1j1";
-    };
-    
-    nativeBuildInputs = with pkgs; [
-      cmake
-      pkg-config
-      qt6.wrapQtAppsHook
-    ];
-    
-    buildInputs = with pkgs; [
-      qt6.qtbase
-      qt6.qtwebsockets
-      openssl
-    ];
-    
-    # Build only the client
-    sourceRoot = "source/AdaptixClient";
+    dontWrapQtApps = true;
     
     configurePhase = ''
       runHook preConfigure
-      # Patch cmake to use current directory
-      cmake -B build .
       runHook postConfigure
     '';
     
     buildPhase = ''
       runHook preBuild
-      cmake --build build
-      runHook postBuild
-    '';
-    
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out/bin
-      cp build/AdaptixClient $out/bin/
-      runHook postInstall
-    '';
-  };
-
-  # Main adaptix package that combines everything
-  adaptix = stdenv.mkDerivation rec {
-    pname = "AdaptixC2";
-    version = "0.7.0";
-        
-    nativeBuildInputs = with pkgs; [
-      makeWrapper
-      openssl
-    ];
-
-    # No actual building, just assembly
-    dontBuild = true;
-    dontConfigure = true;
-    
-    installPhase = ''
-      mkdir -p $out/bin $out/share
-      
-      # Copy binaries
-      cp ${adaptixServer}/bin/AdaptixServer $out/bin/AdaptixServer
-      cp ${adaptixClient}/bin/AdaptixClient $out/bin/AdaptixClient
-      
-      # Generate certificates offline
-      printf '\n\n\n\n\n\n\n' | ${pkgs.openssl}/bin/openssl req -x509 -nodes -newkey rsa:2048 -keyout server.rsa.key -out server.rsa.crt -days 3650
-      mv server.rsa.key $out/share/
-      mv server.rsa.crt $out/share/
-      
-      # Copy configuration files and patch paths
-      substituteInPlace dist/profile.json \
-        --replace-quiet "extenders/" "$out/share/extenders/" \
-        --replace-quiet "404page.html" "$out/share/404page.html" \
-        --replace-quiet "server.rsa.crt" "$out/share/server.rsa.crt" \
-        --replace-quiet "server.rsa.key" "$out/share/server.rsa.key"
-      cp dist/profile.json $out/share/
-      cp -r dist/* $out/share/ || true
-      
-      # Copy extension kit
-      if [ -d ${extensionkit}/share ]; then
-        cp -r ${extensionkit}/share/* $out/share/
+      echo "Patching AdaptixClient/Makefile to fix cmake source directory..."
+      if [ -f AdaptixClient/Makefile ]; then
+        sed -i 's/cmake ..$/cmake ./g' AdaptixClient/Makefile
       fi
       
+      echo "Setting Go environment variables..."
+      export GOCACHE=$TMPDIR/go-build-cache
+      export GOPATH=$TMPDIR/go-path
+      export GOROOT="${go_1_24_4}"
+      export PATH="${go_1_24_4}/bin-wrapped:$PATH"
+      export GOPROXY=off
+      export GOSUMDB=off
+      mkdir -p "$GOCACHE" "$GOPATH"
+
+      if [ -d "AdaptixServer" ] && [ -d "${adaptixServerVendor}/vendor" ]; then
+        echo "Copying vendor for agent_beacon"
+        cp -r ${adaptixServerVendor}/vendor AdaptixServer/
+        cp ${adaptixServerVendor}/go.mod AdaptixServer/ || true
+        cp ${adaptixServerVendor}/go.sum AdaptixServer/ || true
+      fi
+
+
+      echo "Setting up vendored Go modules for Extenders..."
+      if [ -d "Extenders/agent_beacon" ] && [ -d "${agentBeaconVendor}/vendor" ]; then
+        echo "Copying vendor for agent_beacon"
+        cp -r ${agentBeaconVendor}/vendor Extenders/agent_beacon/
+        cp ${agentBeaconVendor}/go.mod Extenders/agent_beacon/ || true
+        cp ${agentBeaconVendor}/go.sum Extenders/agent_beacon/ || true
+      fi
+
+      if [ -d "Extenders/agent_gopher" ] && [ -d "${agentGopherVendor}/vendor" ]; then
+        echo "Copying vendor for agent_gopher"
+        cp -r ${agentGopherVendor}/vendor Extenders/agent_gopher/
+        cp ${agentGopherVendor}/go.mod Extenders/agent_gopher/ || true
+        cp ${agentGopherVendor}/go.sum Extenders/agent_gopher/ || true
+      fi
+
+      if [ -d "Extenders/listener_beacon_http" ] && [ -d "${listenerBeaconHTTPVendor}/vendor" ]; then
+        echo "Copying vendor for listener_beacon_http"
+        cp -r ${listenerBeaconHTTPVendor}/vendor Extenders/listener_beacon_http/
+        cp ${listenerBeaconHTTPVendor}/go.mod Extenders/listener_beacon_http/ || true
+        cp ${listenerBeaconHTTPVendor}/go.sum Extenders/listener_beacon_http/ || true
+      fi
+
+      if [ -d "Extenders/listener_beacon_smb" ] && [ -d "${listenerBeaconSMBVendor}/vendor" ]; then
+        echo "Copying vendor for listener_beacon_smb"
+        cp -r ${listenerBeaconSMBVendor}/vendor Extenders/listener_beacon_smb/
+        cp ${listenerBeaconSMBVendor}/go.mod Extenders/listener_beacon_smb/ || true
+        cp ${listenerBeaconSMBVendor}/go.sum Extenders/listener_beacon_smb/ || true
+      fi
+      
+      if [ -d "Extenders/listener_beacon_tcp" ] && [ -d "${listenerBeaconTCPVendor}/vendor" ]; then
+        echo "Copying vendor for listener_beacon_tcp"
+        cp -r ${listenerBeaconTCPVendor}/vendor Extenders/listener_beacon_tcp/
+        cp ${listenerBeaconTCPVendor}/go.mod Extenders/listener_beacon_tcp/ || true
+        cp ${listenerBeaconTCPVendor}/go.sum Extenders/listener_beacon_tcp/ || true
+      fi
+      
+      if [ -d "Extenders/listener_gopher_tcp" ] && [ -d "${listenerGopherTCPVendor}/vendor" ]; then
+        echo "Copying vendor for listener_gopher_tcp"
+        cp -r ${listenerGopherTCPVendor}/vendor Extenders/listener_gopher_tcp/
+        cp ${listenerGopherTCPVendor}/go.mod Extenders/listener_gopher_tcp/ || true
+        cp ${listenerGopherTCPVendor}/go.sum Extenders/listener_gopher_tcp/ || true
+      fi      
+
+      echo "Running make all..."
+      substituteInPlace Makefile --replace-warn "sudo setcap" "echo skipping setcap"
+      make all || { echo "Makefile build failed!"; exit 1; }
+    '';
+    
+    installPhase = ''
+      mkdir -p $out/bin
+      mkdir -p $out/share
+      mv dist/adaptixserver $out/bin/AdaptixServer
+      mv dist/AdaptixClient $out/bin/AdaptixClient
+      printf '\n\n\n\n\n\n\n' | openssl req -x509 -nodes -newkey rsa:2048 -keyout server.rsa.key -out server.rsa.crt -days 3650
+      mv server.rsa.key $out/share/
+      mv server.rsa.crt $out/share/
+      substituteInPlace dist/profile.json --replace-quiet "extenders/" "$out/share/extenders/"
+      substituteInPlace dist/profile.json --replace-quiet "404page.html" "$out/share/404page.html"
+      substituteInPlace dist/profile.json --replace-quiet "server.rsa.crt" "$out/share/server.rsa.crt"
+      substituteInPlace dist/profile.json --replace-quiet "server.rsa.key" "$out/share/server.rsa.key"
+      mv dist/* $out/share/
       chmod +x $out/bin/AdaptixServer $out/bin/AdaptixClient
     '';
   };
 
-in adaptix
+in
+# Create both the normal build AND a relocatable zip package
+pkgs.stdenv.mkDerivation {
+  name = "AdaptixC2-Complete";
+  version = "0.7.0";
+  
+  nativeBuildInputs = with pkgs; [ zip ];
+  
+  # No source needed, we're packaging the built result
+  dontUnpack = true;
+  dontConfigure = true;
+  dontBuild = true;
+  
+  installPhase = ''
+    mkdir -p $out/bin $out/share
+    
+    # Copy the normal build result
+    cp -r ${adaptix}/bin/* $out/bin/
+    cp -r ${adaptix}/share/* $out/share/
+    cp -r ${extensionkit}/share/* $out/share/
+    
+    # Create relocatable package directory
+    mkdir -p package/AdaptixC2
+    cd package/AdaptixC2
+    
+    # Copy binaries to package
+    mkdir -p bin share
+    cp ${adaptix}/bin/* bin/
+    cp -r ${adaptix}/share/* share/
+    
+    # Create README
+    cat > README.txt << 'EOF'
+AdaptixC2 Relocatable Package
+=============================
+
+Quick Start:
+-----------
+./bin/AdaptixServer     # Start the server
+./bin/AdaptixClient     # Start the client
+
+Files:
+------
+bin/AdaptixServer       # Server binary
+bin/AdaptixClient       # Client binary
+share/                  # Configuration files, certificates, extensions
+README.txt              # This file
+EOF
+    
+    # Create the packages
+    cd ..
+    zip -r AdaptixC2-relocatable.zip AdaptixC2/ >/dev/null
+    
+    # Copy packages to output
+    cp AdaptixC2-relocatable.zip $out/
+    
+    echo "Build complete. Created:"
+    echo "- Normal Nix result in bin/ and share/"
+    echo "- Relocatable packages:"
+    ls -la $out/*.zip
+  '';
+  
+  meta = with pkgs.lib; {
+    description = "AdaptixC2 with relocatable package";
+    platforms = [ "x86_64-linux" ];
+  };
+}
